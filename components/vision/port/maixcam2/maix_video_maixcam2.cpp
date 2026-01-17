@@ -1161,8 +1161,8 @@ namespace maix::video
             err::check_null_raise(audio_frame = av_frame_alloc(), "Could not allocate audio frame");
             err::check_null_raise(swr_ctx = swr_alloc(), "Could not allocate resampler context");
 #if CONFIG_FFMPEG_VERSION_MAJOR == 6 && CONFIG_FFMPEG_VERSION_MINOR == 1 && CONFIG_FFMPEG_VERSION_PATCH == 1
-            av_opt_set_chlayout(swr_ctx, "in_channel_layout", &audio_codec_ctx->ch_layout, 0);
-            av_opt_set_chlayout(swr_ctx, "out_channel_layout", &audio_codec_ctx->ch_layout, 0);
+            av_opt_set_chlayout(swr_ctx, "in_chlayout", &audio_codec_ctx->ch_layout, 0);
+            av_opt_set_chlayout(swr_ctx, "out_chlayout", &audio_codec_ctx->ch_layout, 0);
             resample_channels = audio_codec_ctx->ch_layout.nb_channels;
 #else
             av_opt_set_int(swr_ctx, "in_channel_layout", audio_codec_ctx->channel_layout, 0);
