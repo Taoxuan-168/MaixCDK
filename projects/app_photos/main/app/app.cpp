@@ -989,7 +989,7 @@ _retry:
             int channel = priv.decoder->audio_channels();
             audio::Format format = priv.decoder->audio_format();
             log::info("audio_sample_rate:%d audio_format:%d audio_channels:%d", sample_rate, channel, format);
-            priv.audio_player = new audio::Player("", sample_rate, format, channel);
+            priv.audio_player = new audio::Player("", sample_rate, format, channel, false);
             err::check_null_raise(priv.audio_player, "Audio player init failed!");
         }
 
@@ -1050,7 +1050,7 @@ static void play_video(void)
                 int channel = priv.decoder->audio_channels();
                 audio::Format format = priv.decoder->audio_format();
                 log::info("audio_sample_rate:%d audio_format:%d audio_channels:%d", sample_rate, channel, format);
-                priv.audio_player = new audio::Player("", sample_rate, format, channel);
+                priv.audio_player = new audio::Player("", sample_rate, format, channel, false);
                 err::check_null_raise(priv.audio_player, "Audio player init failed!");
             }
         }
@@ -1127,6 +1127,7 @@ static void play_video(void)
             }
             // log::info("playback video use %lld ms, video list size:%d", time::ticks_ms() - t, priv.video_list->size());
 
+            // t = time::ticks_ms();
             while (priv.audio_list->size() > 0) {
                 video::Context *audio_ctx = *priv.audio_list->begin();
                 if (audio_ctx) {

@@ -234,10 +234,21 @@ int app_pre_init(void)
 {
     auto sensor_size = camera::get_sensor_size();
     __config_camera_resolution_list(&priv.ui_camera_cfg, sensor_size[0], sensor_size[1]);
+#if PLATFORM_MAIXCAM2
+    auto cam2_w = sensor_size[0];
+    auto cam2_h = sensor_size[1];
+    cam2_w = max(min(cam2_w, 1920), 0);
+    cam2_h = max(min(cam2_h, 1080), 0);
+    auto index = __get_camera_resolution_index(&priv.ui_camera_cfg, cam2_w, cam2_h);
+    priv.camera_resolution_w = cam2_w;
+    priv.camera_resolution_h = cam2_h;
+    priv.resolution_index = index;  // 0: 2560x1440; 1: 1920x1080; 2: 1280x720; 3: 640x480
+#else
     auto index = __get_camera_resolution_index(&priv.ui_camera_cfg, sensor_size[0], sensor_size[1]);
     priv.camera_resolution_w = sensor_size[0];
     priv.camera_resolution_h = sensor_size[1];
     priv.resolution_index = index;  // 0: 2560x1440; 1: 1920x1080; 2: 1280x720; 3: 640x480
+#endif
     priv.encoder_bitrate = 3 * 1000 * 1000;
     priv.camera_fps = 30;
     priv.audio_en = true;
