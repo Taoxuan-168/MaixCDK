@@ -308,10 +308,16 @@ _retry:
         std::vector<int> addr_list = i2c_obj.scan();
         for (size_t i = 0; i < addr_list.size(); i++) {
             // log::info("i2c4 addr: 0x%02x", addr_list[i]);
-            switch (addr_list[i]) {
-                case 0x21:
+            if (addr_list[i] == 0x21) {
+                Bytes *data = i2c_obj.readfrom_mem(addr_list[0], 0xf0, 2);
+                if (data && data->size() == 2 && data->data[0] == 0x03 && data->data[1] == 0x0a) {
+                    // log::info("find gcore_gc030a, addr %#x", addr_list[i]);
                     snprintf(name, sizeof(name), "gcore_gc030a");
                     return {true, name};
+                }
+            }
+
+            switch (addr_list[i]) {
                 case 0x29:
                     // log::info("find gcore_gc4653, addr %#x", addr_list[i]);
                     snprintf(name, sizeof(name), "gcore_gc4653");
@@ -368,7 +374,6 @@ _retry:
 			return {0, 0};
 		}
         int retry_count = 0;
-        peripheral::i2c::I2C i2c_obj(4, peripheral::i2c::Mode::MASTER);
 
 _retry:
         if (retry_count < 1) {
@@ -387,27 +392,25 @@ _retry:
             goto _retry;
         }
 
-        std::vector<int> addr_list = i2c_obj.scan();
-        for (size_t i = 0; i < addr_list.size(); i++) {
-            switch (addr_list[i]) {
-                case 0x21: // gcore_gc030a
-                    return {640, 480};
-                case 0x29:  // gcore_gc4653
-                    return {2560, 1440};
-                case 0x30:  // sms_sc035gs
-                    return {640, 480};
-                case 0x2b:  // lt6911
-                    return {1920, 1080};
-                case 0x36:  // ov_os04a10
-                    return {2560, 1440};
-                case 0x37:  // gcore_gc02m1
-                    return {1600, 1200};
-                case 0x48:// fall through
-                case 0x3c:  // ov_ov2685
-                    return {1600, 1200};
-                default: break;
+        std::pair<bool, std::string> sensor_res = _get_sensor_name();
+        if (sensor_res.first == true) {
+            if (!strcmp(sensor_res.second.c_str(), "gcore_gc030a")) {
+                return {640, 480};
+            } else if (!strcmp(sensor_res.second.c_str(), "gcore_gc4653")) {
+                return {2560, 1440};
+            } else if (!strcmp(sensor_res.second.c_str(), "sms_sc035gs")) {
+                return {640, 480};
+            } else if (!strcmp(sensor_res.second.c_str(), "lt6911")) {
+                return {1920, 1080};
+            } else if (!strcmp(sensor_res.second.c_str(), "ov_os04a10")) {
+                return {2560, 1440};
+            } else if (!strcmp(sensor_res.second.c_str(), "gcore_gc02m1")) {
+                return {1600, 1200};
+            } else if (!strcmp(sensor_res.second.c_str(), "ov_ov2685")) {
+                return {1600, 1200};
             }
         }
+
         err::check_raise(err::ERR_RUNTIME, "Not found any sensor");
         return {0, 0};
     }

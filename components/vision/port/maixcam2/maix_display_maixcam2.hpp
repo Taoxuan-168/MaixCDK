@@ -397,6 +397,8 @@ namespace maix::display
                 if (_pool_id == AX_INVALID_POOLID) {
                     return err::ERR_NO_MEM;
                 } else {
+                    _pool_size = size;
+                    _pool_count = count;
                     return err::ERR_NONE;
                 }
             }
@@ -761,6 +763,10 @@ namespace maix::display
                         try {
                             auto dst_pool_id = _dst_pool.pool_id();
                             auto new_frame_format = input_img->format();
+                            auto new_size = _width * _height * image::fmt_size[new_frame_format];
+                            if (new_size > _dst_pool.pool_size()) {
+                                _dst_pool.reset(new_size, 1);
+                            }
                             output_frame = new maixcam2::Frame(dst_pool_id, _width, _height, nullptr, 0, maixcam2::get_ax_fmt_from_maix(new_frame_format));
                             if (new_frame_format >= image::FMT_YVU420SP && new_frame_format <= image::FMT_YUV420P) {
                                 memset(output_frame->data, 0, _width * _height);
