@@ -2,6 +2,8 @@
 #include "maix_basic.hpp"
 #include "maix_pmu.hpp"
 #include "maix_axp2101.hpp"
+#include "maix_gpio.hpp"
+#include "maix_pinmap.hpp"
 #include <iostream>
 #include <string>
 
@@ -11,6 +13,7 @@ typedef struct {
     union {
         maix::ext_dev::axp2101::AXP2101 *axp2101;
     } driver;
+    maix::peripheral::gpio::GPIO *charge_io;
 } pmu_param_t;
 
 PMU::PMU(std::string driver, int i2c_bus, int addr)
@@ -34,8 +37,8 @@ PMU::PMU(std::string driver, int i2c_bus, int addr)
     }
     else if (driver == "maixcam2")
     {
-        // do nothing
-        // TODO: add maixcam pmu class
+        maix::peripheral::pinmap::set_pin_function("B29", "GPIOB29");
+        param->charge_io = new maix::peripheral::gpio::GPIO("B29", maix::peripheral::gpio::Mode::IN, maix::peripheral::gpio::PULL_UP);
     }
     else
     {
@@ -53,6 +56,9 @@ PMU::~PMU()
         if (_driver == "axp2101") {
             delete param->driver.axp2101;
             param->driver.axp2101 = NULL;
+        } else if (_driver == "maixcam2") {
+            delete param->charge_io;
+            param->charge_io = NULL;
         }
         free(_param);
         _param = NULL;
@@ -101,7 +107,7 @@ bool PMU::is_charging()
         ret = param->driver.axp2101->is_charging();
     }
     else if (_driver == "maixcam2") {
-        return false;
+        return param->charge_io->value() > 0 ? false : true;
     }
     return ret;
 }

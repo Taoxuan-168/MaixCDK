@@ -203,6 +203,13 @@
                 std::vector<int>         {6, 2}
             }
         },
+        {"B29", // GPIO1_A29
+            PinInfo {
+                std::vector<std::string> {"GPIOB29"}, // LED light
+                PinRegInfo               {0x104F0078, 16, 3},
+                std::vector<int>         {6}
+            }
+        },
         {"D2", // GPIO3_A2
             PinInfo {
                 std::vector<std::string> {"GPIOD2"}, // boot/user key
