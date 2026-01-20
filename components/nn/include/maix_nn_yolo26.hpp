@@ -11,9 +11,9 @@
 #include "maix_image.hpp"
 #include "maix_nn_F.hpp"
 #include "maix_nn_object.hpp"
-
+#if PLATFORM_MAIXCAM2
 #include <arm_neon.h>
-
+#endif
 namespace maix::nn
 {
     /**
@@ -35,6 +35,9 @@ namespace maix::nn
          */
         YOLO26(const string &model = "", bool dual_buff = true)
         {
+            auto device_id =  sys::device_id();
+            err::check_bool_raise(device_id == "maixcam2", "YOLO26 only support maixcam2");
+
             _model = nullptr;
             _dual_buff = dual_buff;
             if (!model.empty())
@@ -456,6 +459,7 @@ namespace maix::nn
          */
         inline float _find_max_neon(const float *data, int count)
         {
+#if PLATFORM_MAIXCAM2
             if (count <= 0)
                 return -1e9f;
             
@@ -491,6 +495,10 @@ namespace maix::nn
             }
             
             return max_val;
+#else
+            log::error("_find_max_neon not supported");
+            return -1e9f;
+#endif
         }
 
         /**
