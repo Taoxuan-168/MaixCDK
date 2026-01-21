@@ -11,13 +11,13 @@ using namespace maix;
 
 int main(int argc, char *argv[])
 {
-    std::string model_path = "/root/models/yolo26n.mud";
+    std::string model_path = "/root/yolo26n.mud";
     if (argc > 1)
         model_path = argv[1];
 
     // Initialize detector
     // @maixpy detector = nn.YOLO26(model="/root/models/yolo26n.mud", dual_buff=True)
-    nn::YOLO26 detector(model_path, true);
+    nn::YOLO26 detector(model_path, false);
 
     // Initialize camera with model input size
     // @maixpy cam = camera.Camera(detector.input_width(), detector.input_height(), detector.input_format())
