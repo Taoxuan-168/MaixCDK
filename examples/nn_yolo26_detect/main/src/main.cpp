@@ -17,7 +17,7 @@ int main(int argc, char *argv[])
 
     // Initialize detector
     // @maixpy detector = nn.YOLO26(model="/root/models/yolo26n.mud", dual_buff=True)
-    nn::YOLO26 detector(model_path, true);
+    nn::YOLO26 detector(model_path, false);
 
     // Initialize camera with model input size
     // @maixpy cam = camera.Camera(detector.input_width(), detector.input_height(), detector.input_format())
