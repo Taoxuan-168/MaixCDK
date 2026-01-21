@@ -2,7 +2,8 @@
  * @author Tao@sipeed, modified for YOLO26
  * @copyright Sipeed Ltd 2026-
  * @license Apache 2.0
- * @update 2026: Add YOLO26 support with NEON optimization.
+ * @update 2026: YOLO26 with platform-specific SIMD optimization.
+ *                MaixCAM2: NEON, MaixCAM: RVV, Others: Serial
  */
 
 #pragma once
@@ -11,9 +12,22 @@
 #include "maix_image.hpp"
 #include "maix_nn_F.hpp"
 #include "maix_nn_object.hpp"
+#include <algorithm>
+
+// Platform-specific optimization
 #if PLATFORM_MAIXCAM2
-#include <arm_neon.h>
+    #include <arm_neon.h>
+    #define USE_NEON_OPTIMIZATION 1
+    #define USE_RVV_OPTIMIZATION 0
+#elif PLATFORM_MAIXCAM
+    #include <riscv_vector.h>
+    #define USE_NEON_OPTIMIZATION 0
+    #define USE_RVV_OPTIMIZATION 1
+#else
+    #define USE_NEON_OPTIMIZATION 0
+    #define USE_RVV_OPTIMIZATION 0
 #endif
+
 namespace maix::nn
 {
     /**
@@ -25,31 +39,27 @@ namespace maix::nn
     public:
         /**
          * Constructor of YOLO26 class
-         * @param model model path, default empty, you can load model later by load function.
-         * @param[in] dual_buff prepare dual input output buffer to accelerate forward, that is, when NPU is forwarding we not wait and prepare the next input buff.
-         *                      If you want to ensure every time forward output the input's result, set this arg to false please.
-         *                      Default true to ensure speed.
-         * @throw If model arg is not empty and load failed, will throw err::Exception.
          * @maixpy maix.nn.YOLO26.__init__
          * @maixcdk maix.nn.YOLO26.YOLO26
          */
         YOLO26(const string &model = "", bool dual_buff = true)
         {
-            auto device_id =  sys::device_id();
-            err::check_bool_raise(device_id == "maixcam2", "YOLO26 only support maixcam2");
-
             _model = nullptr;
             _dual_buff = dual_buff;
             if (!model.empty())
             {
                 err::Err e = load(model);
-                if (e != err::ERR_NONE)
-                {
-                    char tmp[128] = {0};
-                    snprintf(tmp, sizeof(tmp), "load model %s failed", model.c_str());
-                    throw err::Exception(e, tmp);
-                }
+                err::check_raise(e, "load model failed");
             }
+            
+            // Log optimization method
+#if USE_NEON_OPTIMIZATION
+            log::info("YOLO26 using NEON optimization (MaixCAM2)");
+#elif USE_RVV_OPTIMIZATION
+            log::info("YOLO26 using RVV optimization (MaixCAM)");
+#else
+            log::info("YOLO26 using serial processing");
+#endif
         }
 
         /**
@@ -67,7 +77,6 @@ namespace maix::nn
 
         /**
          * Load model from file
-         * @param model Model path want to load
          * @return err::Err
          * @maixpy maix.nn.YOLO26.load
          */
@@ -78,209 +87,128 @@ namespace maix::nn
                 delete _model;
                 _model = nullptr;
             }
+            
             _model = new nn::NN(model, _dual_buff);
-            if (!_model)
-            {
-                return err::ERR_NO_MEM;
-            }
+            err::check_null_raise(_model, "create model failed");
+            
             _extra_info = _model->extra_info();
             
-            // Check model type
-            if (_extra_info.find("model_type") != _extra_info.end())
+            // Check model type (lenient for compatibility)
+            if (_extra_info.count("model_type"))
             {
-                if (_extra_info["model_type"] != "yolo26")
+                std::string model_type = _extra_info["model_type"];
+                if (model_type.find("yolo26") == std::string::npos && 
+                    model_type.find("YOLO26") == std::string::npos)
                 {
-                    log::error("model_type not match, expect 'yolo26', but got '%s'", _extra_info["model_type"].c_str());
-                    return err::ERR_ARGS;
+                    log::warn("model_type is '%s', expected 'yolo26'. Trying anyway...", 
+                              model_type.c_str());
                 }
             }
-            else
-            {
-                log::error("model_type key not found");
-                return err::ERR_ARGS;
-            }
-            log::info("model info:\n\ttype: yolo26");
             
-            // Parse input type
-            if (_extra_info.find("input_type") != _extra_info.end())
+            // Parse input type (with defaults)
+            if (_extra_info.count("input_type"))
             {
                 std::string input_type = _extra_info["input_type"];
                 if (input_type == "rgb")
-                {
                     _input_img_fmt = maix::image::FMT_RGB888;
-                    log::print(log::LogLevel::LEVEL_INFO, "\tinput type: rgb\n");
-                }
                 else if (input_type == "bgr")
-                {
                     _input_img_fmt = maix::image::FMT_BGR888;
-                    log::print(log::LogLevel::LEVEL_INFO, "\tinput type: bgr\n");
-                }
                 else
                 {
-                    log::error("unknown input type: %s", input_type.c_str());
-                    return err::ERR_ARGS;
+                    log::warn("Unknown input_type '%s', using RGB", input_type.c_str());
+                    _input_img_fmt = maix::image::FMT_RGB888;
                 }
             }
             else
             {
-                log::error("input_type key not found");
-                return err::ERR_ARGS;
+                _input_img_fmt = maix::image::FMT_RGB888;
             }
             
-            // Parse mean
-            if (_extra_info.find("mean") != _extra_info.end())
-            {
-                std::string mean_str = _extra_info["mean"];
-                std::vector<std::string> mean_strs = split(mean_str, ",");
-                log::print(log::LogLevel::LEVEL_INFO, "\tmean:");
-                for (auto &it : mean_strs)
-                {
-                    try
-                    {
-                        this->mean.push_back(std::stof(it));
-                    }
-                    catch (std::exception &e)
-                    {
-                        log::error("mean value error, should float");
-                        return err::ERR_ARGS;
-                    }
-                    log::print(log::LogLevel::LEVEL_INFO, "%f ", this->mean.back());
-                }
-                log::print(log::LogLevel::LEVEL_INFO, "\n");
-            }
+            // Parse mean and scale
+            if (_extra_info.count("mean"))
+                _parse_float_list(_extra_info["mean"], mean);
             else
-            {
-                log::error("mean key not found");
-                return err::ERR_ARGS;
-            }
+                mean = {0.0f, 0.0f, 0.0f};
             
-            // Parse scale
-            if (_extra_info.find("scale") != _extra_info.end())
-            {
-                std::string scale_str = _extra_info["scale"];
-                std::vector<std::string> scale_strs = split(scale_str, ",");
-                log::print(log::LogLevel::LEVEL_INFO, "\tscale:");
-                for (auto &it : scale_strs)
-                {
-                    try
-                    {
-                        this->scale.push_back(std::stof(it));
-                    }
-                    catch (std::exception &e)
-                    {
-                        log::error("scale value error, should float");
-                        return err::ERR_ARGS;
-                    }
-                    log::print(log::LogLevel::LEVEL_INFO, "%f ", this->scale.back());
-                }
-                log::print(log::LogLevel::LEVEL_INFO, "\n");
-            }
+            if (_extra_info.count("scale"))
+                _parse_float_list(_extra_info["scale"], scale);
             else
-            {
-                log::error("scale key not found");
-                return err::ERR_ARGS;
-            }
+                scale = {1.0f/255.0f, 1.0f/255.0f, 1.0f/255.0f};
             
             // Parse labels
             err::Err e = _model->extra_info_labels(labels);
-            if (e == err::Err::ERR_NONE)
+            if (e != err::Err::ERR_NONE || labels.size() == 0)
             {
-                log::print(log::LogLevel::LEVEL_INFO, "\tlabels num: %ld\n", labels.size());
-            }
-            else
-            {
-                log::error("labels key not found: %s", err::to_str(e).c_str());
-                return err::ERR_ARGS;
+                log::warn("labels not in metadata, will infer from output");
             }
             
-            // Get input size from model
+            // Get input size
             std::vector<nn::LayerInfo> inputs = _model->inputs_info();
-            if (inputs[0].shape[3] <= 4) // nhwc
-                _input_size = image::Size(inputs[0].shape[2], inputs[0].shape[1]);
-            else
-                _input_size = image::Size(inputs[0].shape[3], inputs[0].shape[2]);
-            log::print(log::LogLevel::LEVEL_INFO, "\tinput size: %dx%d\n\n", _input_size.width(), _input_size.height());
+            _input_size = (inputs[0].shape[3] <= 4) ? 
+                image::Size(inputs[0].shape[2], inputs[0].shape[1]) :
+                image::Size(inputs[0].shape[3], inputs[0].shape[2]);
+            
+            // Parse output nodes
+            e = _parse_output_nodes();
+            err::check_raise(e, "parse output nodes failed");
+            
+            log::info("YOLO26 loaded: %dx%d, %d classes%s", 
+                      _input_size.width(), _input_size.height(), labels.size(),
+                      _is_nchw ? ", NCHW" : ", NHWC");
             
             return err::ERR_NONE;
         }
 
         /**
          * Detect objects from image
-         * @param img Image want to detect, if image's size not match model input's, will auto resize with fit method.
          * @param conf_th Confidence threshold, default 0.5.
-         * @param iou_th IoU threshold, default 0.45.
-         * @param fit Resize method, default image.Fit.FIT_CONTAIN.
-         * @param sort Sort result according to object size, default 0 means not sort, 1 means bigger in front, -1 means smaller in front.
-         * @throw If image format not match model input format, will throw err::Exception.
+         * @param iou_th IoU threshold (unused, kept for API compatibility).
+         * @param sort Sort result (unused, kept for API compatibility).
          * @return Object list. In C++, you should delete it after use.
          * @maixpy maix.nn.YOLO26.detect
          */
-        std::vector<nn::Object> *detect(image::Image &img, float conf_th = 0.5, float iou_th = 0.45, maix::image::Fit fit = maix::image::FIT_CONTAIN, int sort = 0)
+        std::vector<nn::Object> *detect(image::Image &img, float conf_th = 0.5, 
+                                        float iou_th = 0.45, maix::image::Fit fit = maix::image::FIT_CONTAIN, 
+                                        int sort = 0)
         {
-            this->_conf_th = conf_th;
-            this->_iou_th = iou_th;
+            _conf_th = conf_th;
             
-            if (img.format() != _input_img_fmt)
-            {
-                throw err::Exception("image format not match, input_type: " + image::fmt_names[_input_img_fmt] + ", image format: " + image::fmt_names[img.format()]);
-            }
+            err::check_bool_raise(img.format() == _input_img_fmt, 
+                                  "image format not match");
             
-            tensor::Tensors *outputs;
-            outputs = _model->forward_image(img, this->mean, this->scale, fit, false);
-            if (!outputs) // not ready, return empty result
-            {
+            tensor::Tensors *outputs = _model->forward_image(img, mean, scale, fit, false);
+            if (!outputs)
                 return new std::vector<nn::Object>();
-            }
             
-            std::vector<nn::Object> *res = _post_process(outputs, img.width(), img.height(), fit, sort);
+            std::vector<nn::Object> *res = _post_process(outputs, img.width(), img.height(), fit);
             delete outputs;
             
-            if (res == NULL)
-            {
-                throw err::Exception("post process failed, please see log before");
-            }
             return res;
         }
 
         /**
          * Get model input size
-         * @return model input size
          * @maixpy maix.nn.YOLO26.input_size
          */
-        image::Size input_size()
-        {
-            return _input_size;
-        }
+        image::Size input_size() { return _input_size; }
 
         /**
          * Get model input width
-         * @return model input size of width
          * @maixpy maix.nn.YOLO26.input_width
          */
-        int input_width()
-        {
-            return _input_size.width();
-        }
+        int input_width() { return _input_size.width(); }
 
         /**
          * Get model input height
-         * @return model input size of height
          * @maixpy maix.nn.YOLO26.input_height
          */
-        int input_height()
-        {
-            return _input_size.height();
-        }
+        int input_height() { return _input_size.height(); }
 
         /**
          * Get input image format
-         * @return input image format, image::Format type.
          * @maixpy maix.nn.YOLO26.input_format
          */
-        image::Format input_format()
-        {
-            return _input_img_fmt;
-        }
+        image::Format input_format() { return _input_img_fmt; }
 
     public:
         /**
@@ -313,77 +241,166 @@ namespace maix::nn
         nn::NN *_model;
         std::map<string, string> _extra_info;
         float _conf_th = 0.5;
-        float _iou_th = 0.45;
         bool _dual_buff;
+        bool _is_nchw = false;
         
-        // YOLO26 specific constants
         static constexpr float LOGIT_THRESHOLD = -0.2f;
+        
+        struct OutputNodes
+        {
+            std::string bbox[3];
+            std::string cls[3];
+            int grid_sizes[3][2];
+        } _output_nodes;
 
-    private:
+        /**
+         * Parse output nodes from model
+         */
+        err::Err _parse_output_nodes()
+        {
+            std::vector<nn::LayerInfo> outputs = _model->outputs_info();
+            err::check_bool_raise(outputs.size() >= 6, "need at least 6 outputs");
+            
+            struct OutputInfo { std::string name; int h, w, c; };
+            std::vector<OutputInfo> bbox_outputs, cls_outputs;
+            
+            // Classify outputs by channel count
+            for (const auto &output : outputs)
+            {
+                if (output.shape.size() != 4) continue;
+                
+                OutputInfo info;
+                info.name = output.name;
+                
+#if PLATFORM_MAIXCAM2
+                // MaixCAM2: Always NHWC format
+                info.h = output.shape[1];
+                info.w = output.shape[2];
+                info.c = output.shape[3];
+#else
+                // Other platforms: Auto-detect NCHW vs NHWC
+                int dim1 = output.shape[1];
+                int dim2 = output.shape[2];
+                int dim3 = output.shape[3];
+                
+                // 改进的格式检测逻辑
+                bool is_channel_first = false;
+                
+                // 检查 dim1 是否像是通道数
+                if (dim1 == 4 || dim1 == 80 || 
+                    (labels.size() > 0 && dim1 == (int)labels.size()))
+                {
+                    is_channel_first = true;
+                }
+                // 或者 dim1 明显小于 dim2 和 dim3
+                else if (dim1 <= 100 && dim1 < dim2 && dim1 < dim3)
+                {
+                    is_channel_first = true;
+                }
+                
+                if (is_channel_first)
+                {
+                    // NCHW: 1 x C x H x W
+                    _is_nchw = true;
+                    info.c = dim1;
+                    info.h = dim2;
+                    info.w = dim3;
+                }
+                else
+                {
+                    // NHWC: 1 x H x W x C
+                    info.h = dim1;
+                    info.w = dim2;
+                    info.c = dim3;
+                }
+#endif
+                
+                if (info.c == 4)
+                    bbox_outputs.push_back(info);
+                else if (info.c == (int)labels.size() || info.c == 80)
+                    cls_outputs.push_back(info);
+            }
+            
+            err::check_bool_raise(bbox_outputs.size() == 3 && cls_outputs.size() == 3,
+                                  "need 3 bbox and 3 cls outputs");
+            
+            // Sort by grid size (largest first)
+            auto sort_fn = [](const OutputInfo &a, const OutputInfo &b) {
+                return (a.h * a.w) > (b.h * b.w);
+            };
+            std::sort(bbox_outputs.begin(), bbox_outputs.end(), sort_fn);
+            std::sort(cls_outputs.begin(), cls_outputs.end(), sort_fn);
+            
+            // Store node info
+            for (int i = 0; i < 3; i++)
+            {
+                err::check_bool_raise(bbox_outputs[i].h == cls_outputs[i].h && 
+                                      bbox_outputs[i].w == cls_outputs[i].w,
+                                      "bbox and cls grid size mismatch");
+                
+                _output_nodes.bbox[i] = bbox_outputs[i].name;
+                _output_nodes.cls[i] = cls_outputs[i].name;
+                _output_nodes.grid_sizes[i][0] = bbox_outputs[i].w;
+                _output_nodes.grid_sizes[i][1] = bbox_outputs[i].h;
+            }
+            
+            // Infer labels if not set
+            int num_classes = cls_outputs[0].c;
+            if (labels.size() == 0)
+            {
+                for (int i = 0; i < num_classes; i++)
+                {
+                    labels.push_back("class_" + std::to_string(i));
+                }
+            }
+            
+            return err::ERR_NONE;
+        }
+
         /**
          * Post process for YOLO26 output
          */
-        std::vector<nn::Object> *_post_process(tensor::Tensors *outputs, int img_w, int img_h, maix::image::Fit fit, int sort)
+        std::vector<nn::Object> *_post_process(tensor::Tensors *outputs, int img_w, int img_h, 
+                                                maix::image::Fit fit)
         {
             std::vector<nn::Object> *objects = new std::vector<nn::Object>();
-            int num_class = labels.size();
             
-            // Get output tensors - YOLO26 has 6 outputs: 3 bbox + 3 cls
-            float *bbox[3] = {
-                (float *)(*outputs)["output0"].data(),  // 1*80*80*4
-                (float *)(*outputs)["588"].data(),      // 1*40*40*4
-                (float *)(*outputs)["610"].data()       // 1*20*20*4
-            };
-            float *cls[3] = {
-                (float *)(*outputs)["580"].data(),      // 1*80*80*num_class
-                (float *)(*outputs)["602"].data(),      // 1*40*40*num_class
-                (float *)(*outputs)["624"].data()       // 1*20*20*num_class
-            };
-            
-            // Generate proposals for each scale
-            _generate_proposals(8, 80, 80, bbox[0], cls[0], num_class, *objects);
-            _generate_proposals(16, 40, 40, bbox[1], cls[1], num_class, *objects);
-            _generate_proposals(32, 20, 20, bbox[2], cls[2], num_class, *objects);
-            
-            // NMS
-            if (objects->size() > 0)
+            // Process each scale
+            for (int i = 0; i < 3; i++)
             {
-                std::vector<nn::Object> *objects_total = objects;
-                objects = _nms(*objects);
-                delete objects_total;
+                float *bbox = (float *)(*outputs)[_output_nodes.bbox[i]].data();
+                float *cls = (float *)(*outputs)[_output_nodes.cls[i]].data();
+                int stride = _input_size.width() / _output_nodes.grid_sizes[i][0];
+                int fw = _output_nodes.grid_sizes[i][0];
+                int fh = _output_nodes.grid_sizes[i][1];
                 
-                if (sort != 0)
-                {
-                    _sort_objects(*objects, sort);
-                }
+                _generate_proposals(stride, fw, fh, bbox, cls, labels.size(), *objects);
             }
             
             // Correct bbox to original image size
             if (objects->size() > 0)
-            {
                 _correct_bbox(*objects, img_w, img_h, fit);
-            }
             
             return objects;
         }
 
         /**
-         * Generate proposals using NEON SIMD optimization
+         * Generate proposals with platform-optimized implementation
          */
         void _generate_proposals(int stride, int fw, int fh,
-                                  const float *__restrict__ bbox,
-                                  const float *__restrict__ cls,
-                                  int num_class,
-                                  std::vector<nn::Object> &objs)
+                                  const float *bbox, const float *cls,
+                                  int num_class, std::vector<nn::Object> &objs)
         {
             const int total = fw * fh;
             const float stride_f = (float)stride;
             
+#if USE_NEON_OPTIMIZATION
+            // ========== NEON optimized version for MaixCAM2 (NHWC only) ==========
             for (int i = 0; i < total; i++)
             {
                 const float *c = cls + i * num_class;
                 
-                // Prefetch next data
+                // Prefetch next iteration data
                 if (i + 4 < total)
                 {
                     __builtin_prefetch(cls + (i + 4) * num_class, 0, 1);
@@ -398,17 +415,13 @@ namespace maix::nn
                 
                 // Find class id
                 int class_id = 0;
-                float max_val = c[0];
                 for (int j = 1; j < num_class; j++)
                 {
-                    if (c[j] > max_val)
-                    {
-                        max_val = c[j];
+                    if (c[j] > c[class_id])
                         class_id = j;
-                    }
                 }
                 
-                // Sigmoid and threshold
+                // Check confidence
                 float score = _sigmoid(max_logit);
                 if (score <= _conf_th)
                     continue;
@@ -420,48 +433,205 @@ namespace maix::nn
                 
                 float cx = (ax + 0.5f) * stride_f;
                 float cy = (ay + 0.5f) * stride_f;
-                
                 float x = cx - b[0] * stride_f;
                 float y = cy - b[1] * stride_f;
                 float w = (b[0] + b[2]) * stride_f;
                 float h = (b[1] + b[3]) * stride_f;
                 
                 // Clamp to input size
-                if (x < 0)
-                {
-                    w += x;
-                    x = 0;
-                }
-                if (y < 0)
-                {
-                    h += y;
-                    y = 0;
-                }
-                if (x + w > _input_size.width())
-                {
-                    w = _input_size.width() - x;
-                }
-                if (y + h > _input_size.height())
-                {
-                    h = _input_size.height() - y;
-                }
+                x = std::max(0.0f, x);
+                y = std::max(0.0f, y);
+                w = std::min(w, (float)_input_size.width() - x);
+                h = std::min(h, (float)_input_size.height() - y);
                 
                 if (w > 0 && h > 0)
+                    objs.push_back(Object(x, y, w, h, class_id, score));
+            }
+            
+#elif USE_RVV_OPTIMIZATION
+            // ========== RVV optimized version for MaixCAM (NCHW) ==========
+            
+            if (_is_nchw)
+            {
+                // NCHW format processing with RVV
+                for (int i = 0; i < total; i++)
                 {
-                    Object obj(x, y, w, h, class_id, score);
-                    objs.push_back(obj);
+                    int ax = i % fw;
+                    int ay = i / fw;
+                    
+                    // Find max logit and class id using RVV
+                    float max_logit;
+                    int class_id;
+                    _find_max_class_rvv_nchw(cls, num_class, fh, fw, ay, ax, max_logit, class_id);
+                    
+                    // Early exit
+                    if (max_logit < LOGIT_THRESHOLD)
+                        continue;
+                    
+                    // Check confidence
+                    float score = _sigmoid(max_logit);
+                    if (score <= _conf_th)
+                        continue;
+                    
+                    // Get bbox
+                    float b[4];
+                    b[0] = bbox[0 * fh * fw + ay * fw + ax];
+                    b[1] = bbox[1 * fh * fw + ay * fw + ax];
+                    b[2] = bbox[2 * fh * fw + ay * fw + ax];
+                    b[3] = bbox[3 * fh * fw + ay * fw + ax];
+                    
+                    // Calculate bbox
+                    float cx = (ax + 0.5f) * stride_f;
+                    float cy = (ay + 0.5f) * stride_f;
+                    float x = cx - b[0] * stride_f;
+                    float y = cy - b[1] * stride_f;
+                    float w = (b[0] + b[2]) * stride_f;
+                    float h = (b[1] + b[3]) * stride_f;
+                    
+                    // Clamp to input size
+                    x = std::max(0.0f, x);
+                    y = std::max(0.0f, y);
+                    w = std::min(w, (float)_input_size.width() - x);
+                    h = std::min(h, (float)_input_size.height() - y);
+                    
+                    if (w > 0 && h > 0)
+                        objs.push_back(Object(x, y, w, h, class_id, score));
                 }
             }
+            else
+            {
+                // NHWC format processing with RVV
+                for (int i = 0; i < total; i++)
+                {
+                    int ax = i % fw;
+                    int ay = i / fw;
+                    
+                    const float *c = cls + i * num_class;
+                    const float *b = bbox + i * 4;
+                    
+                    // Find max logit and class id using RVV
+                    float max_logit;
+                    int class_id;
+                    _find_max_class_rvv_nhwc(c, num_class, max_logit, class_id);
+                    
+                    // Early exit
+                    if (max_logit < LOGIT_THRESHOLD)
+                        continue;
+                    
+                    // Check confidence
+                    float score = _sigmoid(max_logit);
+                    if (score <= _conf_th)
+                        continue;
+                    
+                    // Calculate bbox
+                    float cx = (ax + 0.5f) * stride_f;
+                    float cy = (ay + 0.5f) * stride_f;
+                    float x = cx - b[0] * stride_f;
+                    float y = cy - b[1] * stride_f;
+                    float w = (b[0] + b[2]) * stride_f;
+                    float h = (b[1] + b[3]) * stride_f;
+                    
+                    // Clamp to input size
+                    x = std::max(0.0f, x);
+                    y = std::max(0.0f, y);
+                    w = std::min(w, (float)_input_size.width() - x);
+                    h = std::min(h, (float)_input_size.height() - y);
+                    
+                    if (w > 0 && h > 0)
+                        objs.push_back(Object(x, y, w, h, class_id, score));
+                }
+            }
+            
+#else
+            // ========== Serial version (fallback) ==========
+            for (int i = 0; i < total; i++)
+            {
+                int ax = i % fw;
+                int ay = i / fw;
+                
+                // Get class scores (handle NCHW vs NHWC)
+                float class_scores[80];
+                const float *c;
+                
+                if (_is_nchw)
+                {
+                    for (int j = 0; j < num_class; j++)
+                    {
+                        class_scores[j] = cls[j * fh * fw + ay * fw + ax];
+                    }
+                    c = class_scores;
+                }
+                else
+                {
+                    c = cls + i * num_class;
+                }
+                
+                // Find max logit and class id
+                float max_logit = c[0];
+                int class_id = 0;
+                for (int j = 1; j < num_class; j++)
+                {
+                    if (c[j] > max_logit)
+                    {
+                        max_logit = c[j];
+                        class_id = j;
+                    }
+                }
+                
+                // Early exit
+                if (max_logit < LOGIT_THRESHOLD)
+                    continue;
+                
+                // Check confidence
+                float score = _sigmoid(max_logit);
+                if (score <= _conf_th)
+                    continue;
+                
+                // Get bbox (handle NCHW vs NHWC)
+                float b[4];
+                if (_is_nchw)
+                {
+                    b[0] = bbox[0 * fh * fw + ay * fw + ax];
+                    b[1] = bbox[1 * fh * fw + ay * fw + ax];
+                    b[2] = bbox[2 * fh * fw + ay * fw + ax];
+                    b[3] = bbox[3 * fh * fw + ay * fw + ax];
+                }
+                else
+                {
+                    const float *b_ptr = bbox + i * 4;
+                    b[0] = b_ptr[0];
+                    b[1] = b_ptr[1];
+                    b[2] = b_ptr[2];
+                    b[3] = b_ptr[3];
+                }
+                
+                // Calculate bbox
+                float cx = (ax + 0.5f) * stride_f;
+                float cy = (ay + 0.5f) * stride_f;
+                float x = cx - b[0] * stride_f;
+                float y = cy - b[1] * stride_f;
+                float w = (b[0] + b[2]) * stride_f;
+                float h = (b[1] + b[3]) * stride_f;
+                
+                // Clamp to input size
+                x = std::max(0.0f, x);
+                y = std::max(0.0f, y);
+                w = std::min(w, (float)_input_size.width() - x);
+                h = std::min(h, (float)_input_size.height() - y);
+                
+                if (w > 0 && h > 0)
+                    objs.push_back(Object(x, y, w, h, class_id, score));
+            }
+#endif
         }
 
+#if USE_NEON_OPTIMIZATION
         /**
-         * Find max value using NEON SIMD
+         * Find max value using NEON SIMD (MaixCAM2 only)
          */
         inline float _find_max_neon(const float *data, int count)
         {
-#if PLATFORM_MAIXCAM2
-            if (count <= 0)
-                return -1e9f;
+            if (count <= 0) return -1e9f;
             
             int vec_count = count / 16 * 16;
             float32x4_t vmax0 = vdupq_n_f32(-1e9f);
@@ -477,164 +647,195 @@ namespace maix::nn
                 vmax3 = vmaxq_f32(vmax3, vld1q_f32(data + j + 12));
             }
             
-            // Merge
             vmax0 = vmaxq_f32(vmax0, vmax1);
             vmax2 = vmaxq_f32(vmax2, vmax3);
             vmax0 = vmaxq_f32(vmax0, vmax2);
             
-            // Horizontal max
             float32x2_t vmax_pair = vpmax_f32(vget_low_f32(vmax0), vget_high_f32(vmax0));
             vmax_pair = vpmax_f32(vmax_pair, vmax_pair);
             float max_val = vget_lane_f32(vmax_pair, 0);
             
-            // Handle remaining elements
             for (int j = vec_count; j < count; j++)
-            {
-                if (data[j] > max_val)
-                    max_val = data[j];
-            }
+                max_val = std::max(max_val, data[j]);
             
             return max_val;
-#else
-            log::error("_find_max_neon not supported");
-            return -1e9f;
-#endif
         }
+#endif
 
+#if USE_RVV_OPTIMIZATION
         /**
-         * NMS (Non-Maximum Suppression)
+         * Find max value and class id using RVV SIMD for NHWC format (MaixCAM)
          */
-        std::vector<nn::Object> *_nms(std::vector<nn::Object> &objs)
+        inline void _find_max_class_rvv_nhwc(const float *data, int count, 
+                                              float &max_val, int &max_idx)
         {
-            std::vector<nn::Object> *result = new std::vector<nn::Object>();
+            max_val = -1e9f;
+            max_idx = 0;
             
-            // Sort by score
-            std::sort(objs.begin(), objs.end(), [](const nn::Object &a, const nn::Object &b)
-                      { return a.score > b.score; });
+            size_t vl;
+            int i = 0;
             
-            for (size_t i = 0; i < objs.size(); ++i)
+            // Vector loop
+            while (i < count)
             {
-                nn::Object &a = objs.at(i);
-                if (a.score == 0)
-                    continue;
-                    
-                for (size_t j = i + 1; j < objs.size(); ++j)
+                vl = vsetvl_e32m8(count - i);
+                vfloat32m8_t vec = vle32_v_f32m8(data + i, vl);
+                
+                // Find max in this vector segment
+                vfloat32m1_t vmax = vfredmax_vs_f32m8_f32m1(vfmv_s_f_f32m1(vfmv_v_f_f32m1(-1e9f, 1), -1e9f, 1), vec, vfmv_v_f_f32m1(-1e9f, 1), vl);
+                float local_max = vfmv_f_s_f32m1_f32(vmax);
+                
+                // Check if this segment has a new max
+                if (local_max > max_val)
                 {
-                    nn::Object &b = objs.at(j);
-                    if (b.score != 0 && a.class_id == b.class_id && _calc_iou(a, b) > this->_iou_th)
+                    max_val = local_max;
+                    // Find the index within this segment
+                    for (size_t j = 0; j < vl; j++)
                     {
-                        b.score = 0;
+                        if (data[i + j] == local_max)
+                        {
+                            max_idx = i + j;
+                            break;
+                        }
+                    }
+                }
+                
+                i += vl;
+            }
+        }
+        
+        /**
+         * Find max value and class id using RVV SIMD for NCHW format (MaixCAM)
+         */
+        inline void _find_max_class_rvv_nchw(const float *cls, int num_class, 
+                                              int fh, int fw, int ay, int ax,
+                                              float &max_val, int &max_idx)
+        {
+            max_val = -1e9f;
+            max_idx = 0;
+            
+            const int spatial_offset = ay * fw + ax;
+            const int spatial_size = fh * fw;
+            
+            // Gather class scores from NCHW layout
+            // For small num_class (80), scalar is often faster
+            if (num_class <= 80)
+            {
+                for (int j = 0; j < num_class; j++)
+                {
+                    float val = cls[j * spatial_size + spatial_offset];
+                    if (val > max_val)
+                    {
+                        max_val = val;
+                        max_idx = j;
                     }
                 }
             }
-            
-            for (nn::Object &a : objs)
+            else
             {
-                if (a.score != 0)
+                // For large num_class, use RVV with strided load
+                int i = 0;
+                size_t vl;
+                
+                while (i < num_class)
                 {
-                    result->push_back(a);
+                    vl = vsetvl_e32m8(num_class - i);
+                    
+                    // Load with stride (gather from different channels)
+                    vfloat32m8_t vec = vlse32_v_f32m8(cls + i * spatial_size + spatial_offset, 
+                                                       spatial_size * sizeof(float), vl);
+                    
+                    // Find max in this vector segment
+                    vfloat32m1_t vmax = vfredmax_vs_f32m8_f32m1(vfmv_s_f_f32m1(vfmv_v_f_f32m1(-1e9f, 1), -1e9f, 1), vec, vfmv_v_f_f32m1(-1e9f, 1), vl);
+                    float local_max = vfmv_f_s_f32m1_f32(vmax);
+                    
+                    if (local_max > max_val)
+                    {
+                        max_val = local_max;
+                        // Find exact index
+                        for (size_t j = 0; j < vl; j++)
+                        {
+                            float val = cls[(i + j) * spatial_size + spatial_offset];
+                            if (val == local_max)
+                            {
+                                max_idx = i + j;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    i += vl;
                 }
             }
-            
-            return result;
         }
-
-        /**
-         * Sort objects by size
-         */
-        void _sort_objects(std::vector<nn::Object> &objects, int sort)
-        {
-            if (sort > 0)
-                std::sort(objects.begin(), objects.end(), [](const nn::Object a, const nn::Object b)
-                          { return (a.w * a.h) > (b.w * b.h); });
-            else
-                std::sort(objects.begin(), objects.end(), [](const nn::Object a, const nn::Object b)
-                          { return (a.w * a.h) < (b.w * b.h); });
-        }
+#endif
 
         /**
          * Correct bbox to original image size
          */
         void _correct_bbox(std::vector<nn::Object> &objs, int img_w, int img_h, maix::image::Fit fit)
         {
-#define CORRECT_BBOX_RANGE(obj)        \
-    do                                 \
-    {                                  \
-        if (obj.x < 0)                 \
-        {                              \
-            obj.w += obj.x;            \
-            obj.x = 0;                 \
-        }                              \
-        if (obj.y < 0)                 \
-        {                              \
-            obj.h += obj.y;            \
-            obj.y = 0;                 \
-        }                              \
-        if (obj.x + obj.w > img_w)     \
-        {                              \
-            obj.w = img_w - obj.x;     \
-        }                              \
-        if (obj.y + obj.h > img_h)     \
-        {                              \
-            obj.h = img_h - obj.y;     \
-        }                              \
-    } while (0)
-
             if (img_w == _input_size.width() && img_h == _input_size.height())
                 return;
-                
+            
+            float scale_x = (float)_input_size.width() / img_w;
+            float scale_y = (float)_input_size.height() / img_h;
+            
             if (fit == maix::image::FIT_FILL)
             {
-                float scale_x = (float)img_w / _input_size.width();
-                float scale_y = (float)img_h / _input_size.height();
-                for (nn::Object &obj : objs)
+                for (size_t i = 0; i < objs.size(); i++)
                 {
-                    obj.x *= scale_x;
-                    obj.y *= scale_y;
-                    obj.w *= scale_x;
-                    obj.h *= scale_y;
-                    CORRECT_BBOX_RANGE(obj);
+                    auto &obj = objs[i];
+                    obj.x /= scale_x;
+                    obj.y /= scale_y;
+                    obj.w /= scale_x;
+                    obj.h /= scale_y;
+                    _clamp_bbox(obj, img_w, img_h);
                 }
             }
             else if (fit == maix::image::FIT_CONTAIN)
             {
-                float scale_x = ((float)_input_size.width()) / img_w;
-                float scale_y = ((float)_input_size.height()) / img_h;
                 float scale = std::min(scale_x, scale_y);
-                float scale_reverse = 1.0 / scale;
-                float pad_w = (_input_size.width() - img_w * scale) / 2.0;
-                float pad_h = (_input_size.height() - img_h * scale) / 2.0;
-                for (nn::Object &obj : objs)
+                float pad_w = (_input_size.width() - img_w * scale) / 2.0f;
+                float pad_h = (_input_size.height() - img_h * scale) / 2.0f;
+                
+                for (size_t i = 0; i < objs.size(); i++)
                 {
-                    obj.x = (obj.x - pad_w) * scale_reverse;
-                    obj.y = (obj.y - pad_h) * scale_reverse;
-                    obj.w *= scale_reverse;
-                    obj.h *= scale_reverse;
-                    CORRECT_BBOX_RANGE(obj);
+                    auto &obj = objs[i];
+                    obj.x = (obj.x - pad_w) / scale;
+                    obj.y = (obj.y - pad_h) / scale;
+                    obj.w /= scale;
+                    obj.h /= scale;
+                    _clamp_bbox(obj, img_w, img_h);
                 }
             }
             else if (fit == maix::image::FIT_COVER)
             {
-                float scale_x = ((float)_input_size.width()) / img_w;
-                float scale_y = ((float)_input_size.height()) / img_h;
                 float scale = std::max(scale_x, scale_y);
-                float scale_reverse = 1.0 / scale;
-                float pad_w = (img_w * scale - _input_size.width()) / 2.0;
-                float pad_h = (img_h * scale - _input_size.height()) / 2.0;
-                for (nn::Object &obj : objs)
+                float pad_w = (img_w * scale - _input_size.width()) / 2.0f;
+                float pad_h = (img_h * scale - _input_size.height()) / 2.0f;
+
+                for (size_t i = 0; i < objs.size(); i++)
                 {
-                    obj.x = (obj.x + pad_w) * scale_reverse;
-                    obj.y = (obj.y + pad_h) * scale_reverse;
-                    obj.w *= scale_reverse;
-                    obj.h *= scale_reverse;
-                    CORRECT_BBOX_RANGE(obj);
+                    auto &obj = objs[i];
+                    obj.x = (obj.x + pad_w) / scale;
+                    obj.y = (obj.y + pad_h) / scale;
+                    obj.w /= scale;
+                    obj.h /= scale;
+                    _clamp_bbox(obj, img_w, img_h);
                 }
             }
-            else
-            {
-                throw err::Exception(err::ERR_ARGS, "fit type not support");
-            }
-#undef CORRECT_BBOX_RANGE
+        }
+
+        /**
+         * Clamp bbox to image boundaries
+         */
+        inline void _clamp_bbox(nn::Object &obj, int img_w, int img_h)
+        {
+            if (obj.x < 0) { obj.w += obj.x; obj.x = 0; }
+            if (obj.y < 0) { obj.h += obj.y; obj.y = 0; }
+            if (obj.x + obj.w > img_w) obj.w = img_w - obj.x;
+            if (obj.y + obj.h > img_h) obj.h = img_h - obj.y;
         }
 
         /**
@@ -646,41 +847,17 @@ namespace maix::nn
         }
 
         /**
-         * Calculate IoU (Intersection over Union)
+         * Parse float list from string
          */
-        inline static float _calc_iou(Object &a, Object &b)
+        void _parse_float_list(const std::string &str, std::vector<float> &vec)
         {
-            float area1 = a.w * a.h;
-            float area2 = b.w * b.h;
-            float wi = std::min((a.x + a.w), (b.x + b.w)) - std::max(a.x, b.x);
-            float hi = std::min((a.y + a.h), (b.y + b.h)) - std::max(a.y, b.y);
-            float area_i = std::max(wi, 0.0f) * std::max(hi, 0.0f);
-            return area_i / (area1 + area2 - area_i);
-        }
-
-        /**
-         * Split string by delimiter
-         */
-        static std::vector<std::string> split(const std::string &s, const std::string &delimiter)
-        {
-            std::vector<std::string> tokens;
-            size_t pos_start = 0, pos_end, delim_len = delimiter.length();
-            std::string token;
-
-            while ((pos_end = s.find(delimiter, pos_start)) != std::string::npos)
+            size_t start = 0, end;
+            while ((end = str.find(',', start)) != std::string::npos)
             {
-                token = s.substr(pos_start, pos_end - pos_start);
-                pos_start = pos_end + delim_len;
-                token.erase(0, token.find_first_not_of(" \t\r\n"));
-                token.erase(token.find_last_not_of(" \t\r\n") + 1);
-                tokens.push_back(token);
+                vec.push_back(std::stof(str.substr(start, end - start)));
+                start = end + 1;
             }
-            token = s.substr(pos_start);
-            token.erase(0, token.find_first_not_of(" \t\r\n"));
-            token.erase(token.find_last_not_of(" \t\r\n") + 1);
-            tokens.push_back(token);
-            
-            return tokens;
+            vec.push_back(std::stof(str.substr(start)));
         }
     };
 
