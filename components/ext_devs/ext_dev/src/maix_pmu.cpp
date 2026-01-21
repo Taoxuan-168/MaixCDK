@@ -124,6 +124,10 @@ int PMU::get_bat_percent()
         auto f = fs::File("/sys/class/power_supply/cw2015-battery/capacity", "r");
         auto line = f.readline();
         ret = std::stoi(*line);
+
+        // Map the battery precent from [0, 90] to [0, 100].
+        ret = ret * 100 / 90;
+        ret = ret > 100 ? 100 : ret;
         delete line;
     }
     return ret;
