@@ -11,7 +11,7 @@ using namespace maix;
 
 int main(int argc, char *argv[])
 {
-    std::string model_path = "/root/yolo26n.mud";
+    std::string model_path = "/root/models/yolo26n.mud";
     if (argc > 1)
         model_path = argv[1];
 
