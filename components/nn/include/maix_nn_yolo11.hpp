@@ -384,7 +384,7 @@ namespace maix::nn
                     nn::LayerInfo &item = outputs[i];
                     if(item.shape.size() == 4)
                     {
-                        if(item.shape[1] == 4 && item.shape[2] == _anchor_num && item.shape[3] == 1) // hwc
+                        if(item.shape[1] == _anchor_num && item.shape[2] == (int)labels.size() && item.shape[3] == 1) // hwc
                         {
                             _out_chw = false;
                             _out_idxes.dfl = i;
